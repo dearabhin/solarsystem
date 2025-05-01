@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Holographic Solar System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden; /* Prevent scrollbars */
+            background-color: #00001a; /* Dark blue background */
+            font-family: 'Inter', sans-serif; /* Consistent font */
+        }
+        canvas {
+            display: block; /* Remove default inline spacing */
+            width: 100%;   /* Make canvas fill width */
+            height: 100%;  /* Make canvas fill height */
+        }
+        #infoBox {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background-color: rgba(0, 50, 100, 0.7);
+            color: #00ffff; /* Cyan text */
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #00ffff;
+            font-size: 0.9rem;
+            max-width: 300px;
+            display: none; /* Hidden by default */
+            pointer-events: none; /* Don't block mouse events */
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.5);
+        }
+    </style>
+</head>
+<body class="bg-black">
+    <div id="infoBox">Planet Info</div>
+    <canvas id="solarSystemCanvas"></canvas>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        // === Basic Scene Setup ===
+        const scene = new THREE.Scene();
+        const canvas = document.getElementById('solarSystemCanvas');
+        const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio); // Adjust for high-DPI screens
+        renderer.shadowMap.enabled = true; // Enable shadows for potential future use
+
+        // --- Camera ---
+        const fov = 75; // Field of View - wider for a more immersive feel
+        const aspect = window.innerWidth / window.innerHeight;
+        const near = 0.1;
+        const far = 2000;
+        const camera = new THREE.PerspectiveCamera(fov, aspect, near, far);
+        camera.position.set(0, 50, 150); // Start position looking at the center
+
+        // --- Controls ---
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true; // Smooth camera movement
+        controls.dampingFactor = 0.05;
+        controls.screenSpacePanning = false; // Pan orthogonal to camera view
+        controls.minDistance = 10;    // Don't zoom in too close
+        controls.maxDistance = 1000;  // Don't zoom out too far
+        controls.target.set(0, 0, 0); // Look at the center (Sun)
+
+        // === Lighting ===
+        const ambientLight = new THREE.AmbientLight(0x4040ff, 0.5); // Soft blue ambient light
+        scene.add(ambientLight);
+
+        const sunLight = new THREE.PointLight(0xffffff, 1.5, 2000); // Bright light from the sun's position
+        sunLight.position.set(0, 0, 0);
+        sunLight.castShadow = true; // Allow sun to cast shadows (if objects are set to receive)
+        scene.add(sunLight);
+
+        // === Hologram Materials ===
+        const hologramColor = new THREE.Color(0x00ffff); // Cyan blue for hologram effect
+        const sunColor = new THREE.Color(0xffff00); // Yellow for the sun
+
+        // --- Material for Planets ---
+        function createHologramMaterial(color = hologramColor, opacity = 0.7) {
+            return new THREE.MeshBasicMaterial({
+                color: color,
+                wireframe: false, // Start with solid look
+                transparent: true,
+                opacity: opacity,
+                side: THREE.DoubleSide // Render both sides
+            });
+        }
+
+        // --- Material for Outlines ---
+        function createOutlineMaterial(color = hologramColor) {
+            return new THREE.LineBasicMaterial({
+                color: color,
+                linewidth: 1, // Note: linewidth > 1 might not work on all platforms
+            });
+        }
+
+        // --- Material for Sun ---
+        const sunMaterial = new THREE.MeshBasicMaterial({
+            color: sunColor,
+            wireframe: false,
+            transparent: true,
+            opacity: 0.9,
+        });
+         const sunGlowMaterial = new THREE.SpriteMaterial({
+            map: createGlowTexture(sunColor.getHex()),
+            color: sunColor,
+            transparent: true,
+            blending: THREE.AdditiveBlending, // Make it glow
+            depthWrite: false // Don't obscure things behind it
+        });
+
+
+        // === Helper Functions ===
+
+        // --- Create Planet with Outline ---
+        // Takes radius, position (Vector3), name, color, and opacity
+        function createPlanet(radius, position, name, color = hologramColor, opacity = 0.7) {
+            const geometry = new THREE.SphereGeometry(radius, 32, 32);
+            const material = createHologramMaterial(color, opacity);
+            const planet = new THREE.Mesh(geometry, material);
+            planet.position.copy(position); // Set position from the input Vector3
+            planet.name = name; // Store name for identification
+            planet.userData = { type: 'planet', info: `This is ${name}. Radius: ${radius}` }; // Add custom data
+
+            // Create outline
+            const edges = new THREE.EdgesGeometry(geometry);
+            const outline = new THREE.LineSegments(edges, createOutlineMaterial(color));
+            // Outline position is relative to the group, so set to 0,0,0
+            outline.position.set(0, 0, 0);
+            outline.userData = { type: 'outline' }; // Mark as outline
+
+            const group = new THREE.Group(); // Group planet and outline
+            group.add(planet);
+            group.add(outline);
+            group.position.copy(position); // Set the GROUP's position
+            group.name = name + "_group"; // Name the group
+            group.userData = planet.userData; // Copy userData to group for raycasting
+
+            scene.add(group);
+            return group; // Return the group
+        }
+
+        // --- Create Orbit Path ---
+        // Takes radius and color
+        function createOrbit(radius, color = hologramColor) {
+            const curve = new THREE.EllipseCurve(
+                0, 0,           // ax, aY
+                radius, radius, // xRadius, yRadius
+                0, 2 * Math.PI, // aStartAngle, aEndAngle
+                false,          // aClockwise
+                0               // aRotation
+            );
+            const points = curve.getPoints(100); // Get 100 points along the curve
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const material = createOutlineMaterial(color);
+            const orbit = new THREE.Line(geometry, material);
+            orbit.rotation.x = Math.PI / 2; // Rotate to be flat on the XZ plane
+            orbit.userData = { type: 'orbit' }; // Mark as orbit
+            scene.add(orbit);
+            return orbit;
+        }
+
+         // --- Create Glow Texture ---
+         // Takes a hex color value
+        function createGlowTexture(colorHex) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(
+                canvas.width / 2, canvas.height / 2, 0,
+                canvas.width / 2, canvas.height / 2, canvas.width / 2
+            );
+            // Extract RGB from hex for rgba color stops
+            gradient.addColorStop(0, `rgba(${ (colorHex >> 16) & 255 }, ${ (colorHex >> 8) & 255 }, ${ colorHex & 255 }, 1)`);
+            gradient.addColorStop(1, `rgba(${ (colorHex >> 16) & 255 }, ${ (colorHex >> 8) & 255 }, ${ colorHex & 255 }, 0)`);
+
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, canvas.width, canvas.height);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.needsUpdate = true; // Ensure texture updates
+            return texture;
+        }
+
+
+        // === Create Solar System Objects ===
+        const solarSystemObjects = []; // To hold planets and sun for animation/interaction
+
+        // --- Sun ---
+        const sunRadius = 15;
+        const sunGeometry = new THREE.SphereGeometry(sunRadius, 32, 32);
+        const sun = new THREE.Mesh(sunGeometry, sunMaterial);
+        sun.name = "Sun";
+        sun.userData = { type: 'star', info: "This is the Sun." };
+        scene.add(sun);
+        solarSystemObjects.push(sun); // Add sun to the list for raycasting
+
+        // Add Sun Glow
+        const sunGlow = new THREE.Sprite(sunGlowMaterial);
+        sunGlow.scale.set(sunRadius * 4, sunRadius * 4, 1); // Make glow larger than the sun
+        sun.add(sunGlow); // Add glow as a child of the sun mesh
+
+
+        // --- Planets (Distances and sizes are NOT to scale for visual clarity) ---
+        const planetData = [
+            { name: "Mercury", radius: 1, distance: 30, color: 0xaaaaaa },
+            { name: "Venus", radius: 2, distance: 50, color: 0xffd700 },
+            { name: "Earth", radius: 2.2, distance: 75, color: 0x0077ff },
+            { name: "Mars", radius: 1.5, distance: 100, color: 0xff4500 },
+            { name: "Jupiter", radius: 8, distance: 150, color: 0xffa500 },
+            { name: "Saturn", radius: 7, distance: 200, color: 0xf0e68c },
+            { name: "Uranus", radius: 5, distance: 250, color: 0xadd8e6 },
+            { name: "Neptune", radius: 4.8, distance: 300, color: 0x4169e1 },
+        ];
+
+        planetData.forEach(data => {
+            // Place planets initially along the positive X-axis using Vector3
+            // *** FIX: Changed THREE.Position to THREE.Vector3 ***
+            const planetGroup = createPlanet(data.radius, new THREE.Vector3(data.distance, 0, 0), data.name, new THREE.Color(data.color));
+            createOrbit(data.distance); // Create orbit line
+            solarSystemObjects.push(planetGroup); // Add planet group to list for raycasting
+
+             // Special case for Saturn's rings
+            if (data.name === "Saturn") {
+                const ringInnerRadius = data.radius * 1.2;
+                const ringOuterRadius = data.radius * 2.2;
+                const ringGeometry = new THREE.RingGeometry(ringInnerRadius, ringOuterRadius, 64);
+
+                // UV calculation (commented out as no texture is used)
+                // const pos = ringGeometry.attributes.position;
+                // const v3 = new THREE.Vector3();
+                // for (let i = 0; i < pos.count; i++){
+                //     v3.fromBufferAttribute(pos, i);
+                //     ringGeometry.attributes.uv.setXY(i, v3.length() < ringInnerRadius + 0.1 ? 0 : 1, 1);
+                // }
+
+                const ringMaterial = createHologramMaterial(new THREE.Color(0xcccccc), 0.5); // Lighter color for rings
+                const ringMesh = new THREE.Mesh(ringGeometry, ringMaterial);
+                ringMesh.rotation.x = -Math.PI * 0.45; // Tilt the rings
+                ringMesh.rotation.y = Math.PI * 0.1;
+                ringMesh.userData = { type: 'ring' }; // Mark as ring
+
+                 // Add outline to rings
+                const ringEdges = new THREE.EdgesGeometry(ringGeometry);
+                const ringOutline = new THREE.LineSegments(ringEdges, createOutlineMaterial(new THREE.Color(0xcccccc)));
+                ringOutline.rotation.copy(ringMesh.rotation); // Match mesh rotation
+                ringOutline.userData = { type: 'ring_outline' };
+
+                planetGroup.add(ringMesh); // Add ring mesh to Saturn's group
+                planetGroup.add(ringOutline); // Add ring outline to Saturn's group
+            }
+        });
+
+
+        // === Interaction (Raycasting) ===
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const infoBox = document.getElementById('infoBox');
+        let intersectedObject = null; // Keep track of the currently hovered object (group or sun)
+
+        function onMouseMove(event) {
+            // Calculate mouse position in normalized device coordinates (-1 to +1) for raycaster
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            // Update the picking ray with the camera and mouse position
+            raycaster.setFromCamera(mouse, camera);
+
+            // Calculate objects intersecting the picking ray
+            // Check intersection with objects in solarSystemObjects (sun and planet groups)
+            const intersects = raycaster.intersectObjects(solarSystemObjects, true); // true for recursive check within groups
+
+            let firstRelevantIntersect = null;
+            if (intersects.length > 0) {
+                 // Find the first intersected object that is a planet group or the sun
+                 for(let i = 0; i < intersects.length; i++) {
+                    let obj = intersects[i].object;
+                    // Traverse up the hierarchy to find the main group or the sun itself
+                    while (obj.parent && !(obj.userData.type === 'planet' || obj.userData.type === 'star')) {
+                        obj = obj.parent;
+                    }
+                    // Ensure we found a planet group or the sun
+                    if (obj.userData.type === 'planet' || obj.userData.type === 'star') {
+                        firstRelevantIntersect = obj;
+                        break; // Stop after finding the first relevant one
+                    }
+                 }
+            }
+
+            // Handle showing/hiding/updating the info box
+            if (firstRelevantIntersect && firstRelevantIntersect !== intersectedObject) {
+                 // New object hovered
+                intersectedObject = firstRelevantIntersect;
+                infoBox.textContent = intersectedObject.userData.info || intersectedObject.name; // Use stored info or name
+                infoBox.style.display = 'block';
+                infoBox.style.left = `${event.clientX + 15}px`; // Position near cursor
+                infoBox.style.top = `${event.clientY + 15}px`;
+
+                // Optional: Add visual feedback (e.g., slightly change opacity/color)
+                // Remember to revert this change when the mouse leaves
+
+            } else if (!firstRelevantIntersect && intersectedObject) {
+                // Mouse moved off a previously hovered object
+                intersectedObject = null;
+                infoBox.style.display = 'none';
+                // Optional: Restore visual state if changed
+
+            } else if (firstRelevantIntersect && firstRelevantIntersect === intersectedObject) {
+                 // Still hovering the same object, just update the infoBox position
+                 infoBox.style.left = `${event.clientX + 15}px`;
+                 infoBox.style.top = `${event.clientY + 15}px`;
+            }
+        }
+
+        window.addEventListener('mousemove', onMouseMove, false);
+
+        // === Animation Loop ===
+        const clock = new THREE.Clock(); // For time-based animation
+
+        function animate() {
+            requestAnimationFrame(animate); // Request next frame
+
+            const delta = clock.getDelta(); // Time since last frame in seconds
+            const elapsedTime = clock.getElapsedTime(); // Total time elapsed in seconds
+
+            // --- Animate Planets ---
+            solarSystemObjects.forEach(obj => {
+                // Check if the object is a planet group
+                if (obj.userData.type === 'planet') {
+                    // Find the corresponding data entry to get distance and name
+                    // Remove '_group' suffix from the group name to match planetData
+                    const planetDataEntry = planetData.find(p => p.name === obj.name.replace('_group',''));
+                    if (planetDataEntry) {
+                        const distance = planetDataEntry.distance;
+                        // Simple circular orbit calculation
+                        // Adjust speed based on distance (approximation of Kepler's Third Law)
+                        const speedFactor = 0.5; // Overall speed multiplier
+                        // Angular speed calculation: omega = sqrt(GM/r^3), simplified here
+                        const angularSpeed = speedFactor * Math.sqrt(100 / Math.pow(distance, 3));
+
+                        // Update the group's position for orbital motion
+                        obj.position.x = Math.cos(elapsedTime * angularSpeed) * distance;
+                        obj.position.z = Math.sin(elapsedTime * angularSpeed) * distance;
+
+                        // Optional: Add self-rotation to the planet mesh within the group
+                        // Find the actual planet mesh inside the group
+                         const planetMesh = obj.children.find(child => child.userData.type === 'planet');
+                         if (planetMesh) {
+                            planetMesh.rotation.y += delta * 0.5; // Rotate planet mesh around its Y-axis
+                         }
+                         // Also rotate the outline if needed (optional, might look odd)
+                         // const outlineMesh = obj.children.find(child => child.userData.type === 'outline');
+                         // if (outlineMesh) {
+                         //    outlineMesh.rotation.y += delta * 0.5;
+                         // }
+                         // Rotate Saturn's rings with the planet
+                         const ringMesh = obj.children.find(child => child.userData.type === 'ring');
+                         if (ringMesh) {
+                             // Rings should rotate with the planet's tilt, not necessarily self-spin
+                             // ringMesh.rotation.z += delta * 0.1; // Example if you wanted ring spin
+                         }
+
+
+                    }
+                } else if (obj.userData.type === 'star') {
+                    // Optional: Add self-rotation to the Sun
+                    obj.rotation.y += delta * 0.05;
+                }
+            });
+
+            // Update controls (for damping)
+            controls.update();
+
+            // Render the scene from the camera's perspective
+            renderer.render(scene, camera);
+        }
+
+        // === Handle Window Resize ===
+        function onWindowResize() {
+            // Update camera aspect ratio for new window size
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix(); // Apply aspect ratio change
+
+            // Update renderer size to fill the new window size
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            // Adjust pixel ratio for potential display changes (e.g., moving window between monitors)
+            renderer.setPixelRatio(window.devicePixelRatio);
+        }
+
+        // Add resize event listener
+        window.addEventListener('resize', onWindowResize, false);
+
+        // === Start Animation ===
+        // Ensure the DOM is fully loaded before starting the animation loop
+        window.onload = function () {
+             animate();
+        }
+
+    </script>
+</body>
+</html>
